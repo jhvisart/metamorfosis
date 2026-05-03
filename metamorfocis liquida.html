@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MORPHOS V5 — Metamorfosis Líquida</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;900&display=swap" rel="stylesheet">
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; cursor: none; font-family: 'Orbitron', sans-serif; }
+    canvas { display: block; position: fixed; inset: 0; }
+
+    #cursor {
+        position: fixed; width: 20px; height: 20px;
+        border: 1px solid rgba(0, 255, 255, 0.4);
+        border-radius: 50%; pointer-events: none; z-index: 100;
+        transform: translate(-50%, -50%); mix-blend-mode: screen;
+        transition: width 0.3s, height 0.3s;
+    }
+
+    #ui {
+        position: fixed; inset: 0; pointer-events: none; padding: 35px;
+        display: flex; flex-direction: column; justify-content: space-between; z-index: 10;
+    }
+    .state-info { border-left: 3px solid #0ff; padding-left: 18px; }
+    .label { font-size: 8px; color: rgba(0, 255, 255, 0.5); letter-spacing: 5px; text-transform: uppercase; }
+    .state-name { font-size: 28px; color: #fff; font-weight: 900; margin-top: 5px; letter-spacing: 2px; }
+
+    #morph-btn {
+        pointer-events: auto; background: rgba(0,0,0,0.5); border: 1px solid rgba(0, 255, 255, 0.3);
+        color: #0ff; padding: 14px 28px; font-family: 'Orbitron'; font-size: 9px;
+        letter-spacing: 4px; cursor: pointer; transition: 0.4s; align-self: flex-end;
+        backdrop-filter: blur(5px);
+    }
+    #morph-btn:hover { background: #0ff; color: #000; box-shadow: 0 0 20px #0ff; }
+
+    #loading {
+        position: fixed; inset: 0; background: #000; z-index: 100;
+        display: flex; align-items: center; justify-content: center; transition: 1.5s;
+    }
+</style>
+</head>
+<body>
+
+<div id="loading">
+    <div style="color:#0ff; letter-spacing:10px; font-weight:900; font-size:12px; text-shadow: 0 0 10px #0ff;">JAHC504 · NÚCLEO V5</div>
+</div>
+
+<div id="ui">
+    <div class="state-info">
+        <div class="label">Fase de Transmutación</div>
+        <div class="state-name" id="state-txt">NEBULA</div>
+    </div>
+    <button id="morph-btn">INICIAR METAMORFOSIS</button>
+</div>
+
+<div id="cursor"></div>
+<canvas id="c"></canvas>
+
+<script>
+'use strict';
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H, t = 0;
+const particles = [];
+const N_PARTICLES = 3500; 
+
+// Estados de metamorfosis
+let currentState = 'NEBULA';
+let prevState = 'NEBULA';
+let morphFactor = 1.0; // 0 = anterior, 1 = actual
+const morphSpeed = 0.008; // Controla la fluidez de la transición (más bajo = más lento)
+
+let mouse = { x: -100, y: -100, active: false };
+
+// --- MOTOR DE RUIDO ---
+const perm = new Uint8Array(512);
+const p = Array.from({length:256}, (_,i)=>i).sort(()=>Math.random()-0.5);
+for(let i=0; i<512; i++) perm[i] = p[i & 255];
+
+function fade(t) { return t*t*t*(t*(t*6-15)+10); }
+function lerp(a,b,t) { return a + t*(b-a); }
+function grad(h, x, y) {
+    const s = h & 3;
+    if(s==0) return x+y; if(s==1) return -x+y; if(s==2) return x-y; return -x-y;
+}
+function noise2(x, y) {
+    const xi = Math.floor(x)&255, yi = Math.floor(y)&255;
+    const xf = x-Math.floor(x), yf = y-Math.floor(y);
+    const u = fade(xf), v = fade(yf);
+    const aa=perm[perm[xi]+yi], ab=perm[perm[xi]+yi+1], ba=perm[perm[xi+1]+yi], bb=perm[perm[xi+1]+yi+1];
+    return lerp(lerp(grad(aa,xf,yf), grad(ba,xf-1,yf), u), lerp(grad(ab,xf,yf-1), grad(bb,xf-1,yf-1), u), v);
+}
+
+// --- CONFIGURACIÓN DE FORMAS (Valores de JAHC504) ---
+const FLOW = {
+    NEBULA:  { scale:0.002, speed:1.0, curl:0.2, hue: 190 },
+    VORTEX:  { scale:0.005, speed:2.5, curl:12.0, hue: 280 },
+    CRYSTAL: { scale:0.012, speed:0.5, curl:0.0, hue: 170 },
+    BLOOM:   { scale:0.003, speed:1.4, curl:2.5, hue: 15 },
+    STORM:   { scale:0.007, speed:3.2, curl:1.8, hue: 45 },
+    NEURAL:  { scale:0.006, speed:1.1, curl:0.6, hue: 130 }
+};
+
+const STATES = Object.keys(FLOW);
+
+class Particle {
+    constructor() { this.reset(true); }
+    reset(rand=false) {
+        this.x = rand ? Math.random() * W : W/2 + (Math.random()-0.5)*W*0.3;
+        this.y = rand ? Math.random() * H : H/2 + (Math.random()-0.5)*H*0.3;
+        this.vx = 0; this.vy = 0;
+        this.life = Math.random() * 0.5 + 0.5;
+        this.size = Math.random() * 1.8 + 0.4;
+    }
+
+    update(flow) {
+        // Campo de flujo interpolado
+        let nx = this.x * flow.scale;
+        let ny = this.y * flow.scale + t * 0.005;
+        let angle = noise2(nx, ny) * Math.PI * 4;
+
+        // Mezcla de comportamiento Vortex/Curl líquido
+        if (flow.curl > 0.1) {
+            let dx = this.x - W/2, dy = this.y - H/2;
+            let r = Math.sqrt(dx*dx + dy*dy) + 1;
+            let curlAngle = Math.atan2(dy, dx) + Math.PI/2;
+            angle = lerp(angle, curlAngle, Math.min(flow.curl / (1 + r * 0.003), 0.85));
+        }
+
+        // Suavizado de velocidad
+        this.vx = lerp(this.vx, Math.cos(angle) * flow.speed, 0.08);
+        this.vy = lerp(this.vy, Math.sin(angle) * flow.speed, 0.08);
+
+        // Interactividad magnética
+        if (mouse.active) {
+            let dx = mouse.x - this.x, dy = mouse.y - this.y;
+            let d = Math.sqrt(dx*dx + dy*dy);
+            if (d < 250) {
+                this.vx += (dx/d) * 0.4; this.vy += (dy/d) * 0.4;
+            }
+        }
+
+        this.x += this.vx; this.y += this.vy;
+        this.life -= 0.0025;
+        if(this.life <= 0) this.reset();
+        
+        // Bordes suaves
+        if(this.x<0)this.x=W; if(this.x>W)this.x=0;
+        if(this.y<0)this.y=H; if(this.y>H)this.y=0;
+    }
+
+    draw(hue) {
+        // Onda de color cromatóforo automática
+        let dynamicHue = hue + Math.sin(this.x * 0.005 + t * 0.05) * 25;
+        ctx.fillStyle = `hsla(${dynamicHue}, 90%, 60%, ${this.life})`;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI*2);
+        ctx.fill();
+    }
+}
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+for(let i=0; i<N_PARTICLES; i++) particles.push(new Particle());
+
+function animate() {
+    // Fondo negro profundo (Efecto estela)
+    ctx.fillStyle = 'rgba(0,0,0,0.12)';
+    ctx.fillRect(0,0,W,H);
+
+    // Lógica de Metamorfosis Líquida (Interpolación de estados)
+    if (morphFactor < 1) morphFactor += morphSpeed;
+
+    const fA = FLOW[prevState], fB = FLOW[currentState];
+    const blended = {
+        scale: lerp(fA.scale, fB.scale, morphFactor),
+        speed: lerp(fA.speed, fB.speed, morphFactor),
+        curl:  lerp(fA.curl, fB.curl, morphFactor),
+        hue:   lerp(fA.hue, fB.hue, morphFactor)
+    };
+
+    particles.forEach(p => {
+        p.update(blended);
+        p.draw(blended.hue);
+    });
+
+    t += 1;
+    requestAnimationFrame(animate);
+}
+
+// Eventos
+window.addEventListener('mousemove', e => { 
+    mouse.x = e.clientX; mouse.y = e.clientY; 
+    const cur = document.getElementById('cursor');
+    cur.style.left = e.clientX+'px';
+    cur.style.top = e.clientY+'px';
+});
+window.addEventListener('mousedown', () => {
+    mouse.active = true;
+    document.getElementById('cursor').style.width = '40px';
+    document.getElementById('cursor').style.height = '40px';
+});
+window.addEventListener('mouseup', () => {
+    mouse.active = false;
+    document.getElementById('cursor').style.width = '20px';
+    document.getElementById('cursor').style.height = '20px';
+});
+
+document.getElementById('morph-btn').addEventListener('click', () => {
+    prevState = currentState;
+    let idx = (STATES.indexOf(currentState) + 1) % STATES.length;
+    currentState = STATES[idx];
+    morphFactor = 0; // Inicia la transición líquida
+    document.getElementById('state-txt').textContent = currentState;
+});
+
+// Inicio
+setTimeout(() => {
+    document.getElementById('loading').style.opacity = '0';
+    setTimeout(() => document.getElementById('loading').remove(), 1000);
+    animate();
+}, 1800);
+</script>
+</body>
+</html>
